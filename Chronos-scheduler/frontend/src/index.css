@@ -1,0 +1,91 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Roboto', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #888;
+  border-radius: 5px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+
+/* Utility classes */
+.btn-primary {
+  @apply bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded transition-colors;
+}
+
+.btn-secondary {
+  @apply bg-gray-600 hover:bg-gray-700 text-white font-medium py-2 px-4 rounded transition-colors;
+}
+
+.btn-danger {
+  @apply bg-red-600 hover:bg-red-700 text-white font-medium py-2 px-4 rounded transition-colors;
+}
+
+.btn-success {
+  @apply bg-green-600 hover:bg-green-700 text-white font-medium py-2 px-4 rounded transition-colors;
+}
+
+.card {
+  @apply bg-white rounded-lg shadow-md p-6;
+}
+
+.input-field {
+  @apply w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500;
+}
+
+.table-container {
+  @apply overflow-x-auto rounded-lg border border-gray-200;
+}
+
+.priority-critical {
+  @apply bg-red-100 text-red-800 px-2 py-1 rounded text-xs font-semibold;
+}
+
+.priority-high {
+  @apply bg-orange-100 text-orange-800 px-2 py-1 rounded text-xs font-semibold;
+}
+
+.priority-medium {
+  @apply bg-yellow-100 text-yellow-800 px-2 py-1 rounded text-xs font-semibold;
+}
+
+.priority-low {
+  @apply bg-green-100 text-green-800 px-2 py-1 rounded text-xs font-semibold;
+}
+
+.status-green {
+  @apply bg-green-500;
+}
+
+.status-yellow {
+  @apply bg-yellow-500;
+}
+
+.status-red {
+  @apply bg-red-500;
+}

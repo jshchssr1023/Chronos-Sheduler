@@ -1,0 +1,476 @@
+import { Router, Request, Response } from 'express';
+import multer from 'multer';
+import XLSX from 'xlsx';
+import prisma from '../utils/prisma';
+import { createError } from '../middleware/errorHandler';
+
+const router = Router();
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }
+});
+
+/**
+ * GET /api/cars
+ * Get all cars with filters
+ * Query params: customer, leaseNumber, type, priority, status, reason, page, limit
+ */
+router.get('/', async (req: Request, res: Response) => {
+  try {
+    const {
+      customer,
+      leaseNumber,
+      type,
+      priority,
+      status,
+      reason,
+      page = '1',
+      limit = '100'
+    } = req.query;
+
+    const pageNum = parseInt(page as string);
+    const limitNum = parseInt(limit as string);
+    const skip = (pageNum - 1) * limitNum;
+
+    const where: any = {};
+    if (customer) where.customer = { contains: customer as string, mode: 'insensitive' };
+    if (leaseNumber) where.leaseNumber = { contains: leaseNumber as string, mode: 'insensitive' };
+    if (type) where.type = { contains: type as string, mode: 'insensitive' };
+    if (priority) where.priority = priority as string;
+    if (status) where.status = status as string;
+    if (reason) where.reason = { contains: reason as string, mode: 'insensitive' };
+
+    const [cars, total] = await Promise.all([
+      prisma.car.findMany({
+        where,
+        include: {
+          assignments: {
+            include: {
+              shop: true
+            }
+          }
+        },
+        orderBy: [
+          { priority: 'asc' },
+          { qualDue: 'asc' }
+        ],
+        skip,
+        take: limitNum
+      }),
+      prisma.car.count({ where })
+    ]);
+
+    res.json({
+      success: true,
+      data: cars,
+      pagination: {
+        total,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(total / limitNum)
+      }
+    });
+  } catch (error: any) {
+    throw createError(error.message, 500);
+  }
+});
+
+/**
+ * GET /api/cars/:id
+ * Get a single car
+ */
+router.get('/:id', async (req: Request, res: Response) => {
+  try {
+    const carId = parseInt(req.params.id);
+
+    const car = await prisma.car.findUnique({
+      where: { id: carId },
+      include: {
+        assignments: {
+          include: {
+            shop: true
+          },
+          orderBy: { month: 'asc' }
+        }
+      }
+    });
+
+    if (!car) {
+      throw createError('Car not found', 404);
+    }
+
+    res.json({
+      success: true,
+      data: car
+    });
+  } catch (error: any) {
+    throw createError(error.message, error.statusCode || 500);
+  }
+});
+
+/**
+ * POST /api/cars
+ * Create a new car
+ */
+router.post('/', async (req: Request, res: Response) => {
+  try {
+    const {
+      mark,
+      customer,
+      leaseNumber,
+      type,
+      level2Type,
+      qualDue,
+      priority,
+      status,
+      reason
+    } = req.body;
+
+    if (!mark || !customer || !leaseNumber || !type || !level2Type || !qualDue || !priority) {
+      throw createError('Required fields: mark, customer, leaseNumber, type, level2Type, qualDue, priority', 400);
+    }
+
+    // Check for duplicate mark
+    const existing = await prisma.car.findUnique({ where: { mark } });
+    if (existing) {
+      throw createError('Car mark already exists', 400);
+    }
+
+    const car = await prisma.car.create({
+      data: {
+        mark,
+        customer,
+        leaseNumber,
+        type,
+        level2Type,
+        qualDue: new Date(qualDue),
+        priority,
+        status: status || 'unscheduled',
+        reason: reason || null
+      }
+    });
+
+    res.status(201).json({
+      success: true,
+      data: car
+    });
+  } catch (error: any) {
+    throw createError(error.message, error.statusCode || 500);
+  }
+});
+
+/**
+ * PUT /api/cars/:id
+ * Update a car
+ */
+router.put('/:id', async (req: Request, res: Response) => {
+  try {
+    const carId = parseInt(req.params.id);
+    const {
+      mark,
+      customer,
+      leaseNumber,
+      type,
+      level2Type,
+      qualDue,
+      priority,
+      status,
+      reason
+    } = req.body;
+
+    const car = await prisma.car.findUnique({ where: { id: carId } });
+    if (!car) {
+      throw createError('Car not found', 404);
+    }
+
+    // If mark is being changed, check for duplicates
+    if (mark && mark !== car.mark) {
+      const existing = await prisma.car.findUnique({ where: { mark } });
+      if (existing) {
+        throw createError('Car mark already exists', 400);
+      }
+    }
+
+    const updated = await prisma.car.update({
+      where: { id: carId },
+      data: {
+        ...(mark && { mark }),
+        ...(customer && { customer }),
+        ...(leaseNumber && { leaseNumber }),
+        ...(type && { type }),
+        ...(level2Type && { level2Type }),
+        ...(qualDue && { qualDue: new Date(qualDue) }),
+        ...(priority && { priority }),
+        ...(status && { status }),
+        ...(reason !== undefined && { reason })
+      }
+    });
+
+    res.json({
+      success: true,
+      data: updated
+    });
+  } catch (error: any) {
+    throw createError(error.message, error.statusCode || 500);
+  }
+});
+
+/**
+ * DELETE /api/cars/:id
+ * Delete a car
+ */
+router.delete('/:id', async (req: Request, res: Response) => {
+  try {
+    const carId = parseInt(req.params.id);
+
+    const car = await prisma.car.findUnique({
+      where: { id: carId },
+      include: { _count: { select: { assignments: true } } }
+    });
+
+    if (!car) {
+      throw createError('Car not found', 404);
+    }
+
+    // Cascade delete will handle assignments
+    await prisma.car.delete({ where: { id: carId } });
+
+    res.json({
+      success: true,
+      message: `Car deleted successfully${car._count.assignments > 0 ? ` (${car._count.assignments} assignments removed)` : ''}`
+    });
+  } catch (error: any) {
+    throw createError(error.message, error.statusCode || 500);
+  }
+});
+
+/**
+ * POST /api/cars/bulk-import
+ * Import cars from CSV/XLSX
+ * Expected columns: mark, customer, leaseNumber, type, level2Type, qualDue, priority, status, reason
+ */
+router.post('/bulk-import', upload.single('file'), async (req: Request, res: Response) => {
+  try {
+    if (!req.file) {
+      throw createError('No file uploaded', 400);
+    }
+
+    let workbook: XLSX.WorkBook;
+    
+    if (req.file.mimetype === 'text/csv') {
+      const csvData = req.file.buffer.toString('utf-8');
+      workbook = XLSX.read(csvData, { type: 'string' });
+    } else {
+      workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
+    }
+
+    const sheetName = workbook.SheetNames[0];
+    const sheet = workbook.Sheets[sheetName];
+    const data = XLSX.utils.sheet_to_json(sheet);
+
+    if (data.length === 0) {
+      throw createError('File is empty', 400);
+    }
+
+    // Validate data structure
+    const requiredFields = ['mark', 'customer', 'leaseNumber', 'type', 'level2Type', 'qualDue', 'priority'];
+    const firstRow: any = data[0];
+    const missingFields = requiredFields.filter(field => !(field in firstRow));
+
+    if (missingFields.length > 0) {
+      throw createError(`Missing required fields: ${missingFields.join(', ')}`, 400);
+    }
+
+    // Check for duplicate marks in upload
+    const marks = data.map((row: any) => row.mark);
+    const duplicateMarks = marks.filter((mark, index) => marks.indexOf(mark) !== index);
+    if (duplicateMarks.length > 0) {
+      throw createError(`Duplicate car marks in file: ${[...new Set(duplicateMarks)].join(', ')}`, 400);
+    }
+
+    // Check for existing marks in database
+    const existingCars = await prisma.car.findMany({
+      where: {
+        mark: { in: marks }
+      },
+      select: { mark: true }
+    });
+
+    if (existingCars.length > 0) {
+      const existingMarks = existingCars.map(c => c.mark);
+      throw createError(`Cars with these marks already exist: ${existingMarks.join(', ')}`, 400);
+    }
+
+    // Validate and transform data
+    const cars = data.map((row: any, index: number) => {
+      const qualDue = new Date(row.qualDue);
+      if (isNaN(qualDue.getTime())) {
+        throw createError(`Invalid qualDue at row ${index + 2}: ${row.qualDue}`, 400);
+      }
+
+      return {
+        mark: String(row.mark).trim(),
+        customer: String(row.customer).trim(),
+        leaseNumber: String(row.leaseNumber).trim(),
+        type: String(row.type).trim(),
+        level2Type: String(row.level2Type).trim(),
+        qualDue,
+        priority: String(row.priority).trim(),
+        status: row.status ? String(row.status).trim() : 'unscheduled',
+        reason: row.reason ? String(row.reason).trim() : null
+      };
+    });
+
+    // Bulk create
+    const result = await prisma.car.createMany({
+      data: cars
+    });
+
+    res.json({
+      success: true,
+      message: `Successfully imported ${result.count} cars`,
+      count: result.count
+    });
+  } catch (error: any) {
+    throw createError(error.message, error.statusCode || 500);
+  }
+});
+
+/**
+ * GET /api/cars/export/xlsx
+ * Export all cars to XLSX
+ */
+router.get('/export/xlsx', async (req: Request, res: Response) => {
+  try {
+    const cars = await prisma.car.findMany({
+      include: {
+        assignments: {
+          include: {
+            shop: true
+          }
+        }
+      },
+      orderBy: [
+        { priority: 'asc' },
+        { qualDue: 'asc' }
+      ]
+    });
+
+    const exportData = cars.map(car => ({
+      mark: car.mark,
+      customer: car.customer,
+      leaseNumber: car.leaseNumber,
+      type: car.type,
+      level2Type: car.level2Type,
+      qualDue: car.qualDue.toISOString().split('T')[0],
+      priority: car.priority,
+      status: car.status,
+      reason: car.reason || '',
+      assignmentCount: car.assignments.length,
+      shops: car.assignments.map(a => a.shop.name).join(', ')
+    }));
+
+    const worksheet = XLSX.utils.json_to_sheet(exportData);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Cars');
+
+    const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+
+    res.setHeader('Content-Disposition', `attachment; filename=cars_export_${Date.now()}.xlsx`);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.send(buffer);
+  } catch (error: any) {
+    throw createError(error.message, 500);
+  }
+});
+
+/**
+ * GET /api/cars/template/download
+ * Download a CSV template for car import
+ */
+router.get('/template/download', (req: Request, res: Response) => {
+  const template = [
+    {
+      mark: 'CAR-001',
+      customer: 'Customer A',
+      leaseNumber: 'LSE-12345',
+      type: 'Sedan',
+      level2Type: 'Luxury',
+      qualDue: '2024-12-31',
+      priority: 'High',
+      status: 'unscheduled',
+      reason: ''
+    },
+    {
+      mark: 'CAR-002',
+      customer: 'Customer B',
+      leaseNumber: 'LSE-12346',
+      type: 'SUV',
+      level2Type: 'Standard',
+      qualDue: '2024-11-30',
+      priority: 'Medium',
+      status: 'unscheduled',
+      reason: ''
+    }
+  ];
+
+  const worksheet = XLSX.utils.json_to_sheet(template);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'Cars');
+
+  const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+
+  res.setHeader('Content-Disposition', 'attachment; filename=cars_template.xlsx');
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.send(buffer);
+});
+
+/**
+ * GET /api/cars/stats/summary
+ * Get car statistics
+ */
+router.get('/stats/summary', async (req: Request, res: Response) => {
+  try {
+    const [
+      total,
+      unscheduled,
+      scheduled,
+      byPriority,
+      byStatus
+    ] = await Promise.all([
+      prisma.car.count(),
+      prisma.car.count({ where: { status: 'unscheduled' } }),
+      prisma.car.count({ where: { status: 'scheduled' } }),
+      prisma.car.groupBy({
+        by: ['priority'],
+        _count: true
+      }),
+      prisma.car.groupBy({
+        by: ['status'],
+        _count: true
+      })
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        total,
+        unscheduled,
+        scheduled,
+        byPriority: byPriority.reduce((acc: any, item) => {
+          acc[item.priority] = item._count;
+          return acc;
+        }, {}),
+        byStatus: byStatus.reduce((acc: any, item) => {
+          acc[item.status] = item._count;
+          return acc;
+        }, {})
+      }
+    });
+  } catch (error: any) {
+    throw createError(error.message, 500);
+  }
+});
+
+export default router;

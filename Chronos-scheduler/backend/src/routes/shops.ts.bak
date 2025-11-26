@@ -1,0 +1,327 @@
+import { Router, Request, Response } from 'express';
+import multer from 'multer';
+import XLSX from 'xlsx';
+import prisma from '../utils/prisma';
+import { createError } from '../middleware/errorHandler';
+
+const router = Router();
+
+// Configure multer for file uploads
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = [
+      'text/csv',
+      'application/vnd.ms-excel',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    ];
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Invalid file type. Only CSV and XLSX files are allowed.'));
+    }
+  }
+});
+
+/**
+ * GET /api/shops
+ * Get all shops
+ */
+router.get('/', async (req: Request, res: Response) => {
+  try {
+    const shops = await prisma.shop.findMany({
+      include: {
+        _count: {
+          select: { assignments: true }
+        }
+      },
+      orderBy: { name: 'asc' }
+    });
+
+    res.json({
+      success: true,
+      data: shops,
+      count: shops.length
+    });
+  } catch (error: any) {
+    throw createError(error.message, 500);
+  }
+});
+
+/**
+ * GET /api/shops/:id
+ * Get a single shop
+ */
+router.get('/:id', async (req: Request, res: Response) => {
+  try {
+    const shopId = parseInt(req.params.id);
+
+    const shop = await prisma.shop.findUnique({
+      where: { id: shopId },
+      include: {
+        assignments: {
+          include: {
+            car: true
+          }
+        }
+      }
+    });
+
+    if (!shop) {
+      throw createError('Shop not found', 404);
+    }
+
+    res.json({
+      success: true,
+      data: shop
+    });
+  } catch (error: any) {
+    throw createError(error.message, error.statusCode || 500);
+  }
+});
+
+/**
+ * POST /api/shops
+ * Create a new shop
+ */
+router.post('/', async (req: Request, res: Response) => {
+  try {
+    const { name, city, code, capacity } = req.body;
+
+    if (!name || !city || !code || !capacity) {
+      throw createError('name, city, code, and capacity are required', 400);
+    }
+
+    // Check for duplicate code
+    const existing = await prisma.shop.findUnique({ where: { code } });
+    if (existing) {
+      throw createError('Shop code already exists', 400);
+    }
+
+    const shop = await prisma.shop.create({
+      data: {
+        name,
+        city,
+        code,
+        capacity: parseInt(capacity)
+      }
+    });
+
+    res.status(201).json({
+      success: true,
+      data: shop
+    });
+  } catch (error: any) {
+    throw createError(error.message, error.statusCode || 500);
+  }
+});
+
+/**
+ * PUT /api/shops/:id
+ * Update a shop
+ */
+router.put('/:id', async (req: Request, res: Response) => {
+  try {
+    const shopId = parseInt(req.params.id);
+    const { name, city, code, capacity } = req.body;
+
+    const shop = await prisma.shop.findUnique({ where: { id: shopId } });
+    if (!shop) {
+      throw createError('Shop not found', 404);
+    }
+
+    // If code is being changed, check for duplicates
+    if (code && code !== shop.code) {
+      const existing = await prisma.shop.findUnique({ where: { code } });
+      if (existing) {
+        throw createError('Shop code already exists', 400);
+      }
+    }
+
+    const updated = await prisma.shop.update({
+      where: { id: shopId },
+      data: {
+        ...(name && { name }),
+        ...(city && { city }),
+        ...(code && { code }),
+        ...(capacity && { capacity: parseInt(capacity) })
+      }
+    });
+
+    res.json({
+      success: true,
+      data: updated
+    });
+  } catch (error: any) {
+    throw createError(error.message, error.statusCode || 500);
+  }
+});
+
+/**
+ * DELETE /api/shops/:id
+ * Delete a shop
+ */
+router.delete('/:id', async (req: Request, res: Response) => {
+  try {
+    const shopId = parseInt(req.params.id);
+
+    const shop = await prisma.shop.findUnique({
+      where: { id: shopId },
+      include: { _count: { select: { assignments: true } } }
+    });
+
+    if (!shop) {
+      throw createError('Shop not found', 404);
+    }
+
+    if (shop._count.assignments > 0) {
+      throw createError(`Cannot delete shop with ${shop._count.assignments} assignments`, 400);
+    }
+
+    await prisma.shop.delete({ where: { id: shopId } });
+
+    res.json({
+      success: true,
+      message: 'Shop deleted successfully'
+    });
+  } catch (error: any) {
+    throw createError(error.message, error.statusCode || 500);
+  }
+});
+
+/**
+ * POST /api/shops/upload
+ * Upload CSV/XLSX to replace all shops
+ * Expected columns: name, city, code, capacity
+ */
+router.post('/upload', upload.single('file'), async (req: Request, res: Response) => {
+  try {
+    if (!req.file) {
+      throw createError('No file uploaded', 400);
+    }
+
+    // Parse file based on type
+    let workbook: XLSX.WorkBook;
+    
+    if (req.file.mimetype === 'text/csv') {
+      const csvData = req.file.buffer.toString('utf-8');
+      workbook = XLSX.read(csvData, { type: 'string' });
+    } else {
+      workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
+    }
+
+    const sheetName = workbook.SheetNames[0];
+    const sheet = workbook.Sheets[sheetName];
+    const data = XLSX.utils.sheet_to_json(sheet);
+
+    if (data.length === 0) {
+      throw createError('File is empty', 400);
+    }
+
+    // Validate data structure
+    const requiredFields = ['name', 'city', 'code', 'capacity'];
+    const firstRow: any = data[0];
+    const missingFields = requiredFields.filter(field => !(field in firstRow));
+
+    if (missingFields.length > 0) {
+      throw createError(`Missing required fields: ${missingFields.join(', ')}`, 400);
+    }
+
+    // Check for duplicate codes in upload
+    const codes = data.map((row: any) => row.code);
+    const duplicateCodes = codes.filter((code, index) => codes.indexOf(code) !== index);
+    if (duplicateCodes.length > 0) {
+      throw createError(`Duplicate shop codes in file: ${[...new Set(duplicateCodes)].join(', ')}`, 400);
+    }
+
+    // Validate and transform data
+    const shops = data.map((row: any, index: number) => {
+      const capacity = parseInt(row.capacity);
+      if (isNaN(capacity) || capacity <= 0) {
+        throw createError(`Invalid capacity at row ${index + 2}: ${row.capacity}`, 400);
+      }
+
+      return {
+        name: String(row.name).trim(),
+        city: String(row.city).trim(),
+        code: String(row.code).trim(),
+        capacity
+      };
+    });
+
+    // Transaction: Delete old shops and create new ones
+    const result = await prisma.$transaction(async (tx) => {
+      // Get all cars that will be unassigned
+      const carsToUnassign = await tx.car.findMany({
+        where: {
+          status: 'scheduled'
+        },
+        select: { id: true }
+      });
+
+      // Delete all assignments (cascade will handle this, but explicit is clearer)
+      await tx.assignment.deleteMany({});
+
+      // Update all previously scheduled cars to unscheduled
+      if (carsToUnassign.length > 0) {
+        await tx.car.updateMany({
+          where: {
+            id: { in: carsToUnassign.map(c => c.id) }
+          },
+          data: { status: 'unscheduled' }
+        });
+      }
+
+      // Delete all shops
+      await tx.shop.deleteMany({});
+
+      // Create new shops
+      const created = await tx.shop.createMany({
+        data: shops
+      });
+
+      return { created: created.count, unassigned: carsToUnassign.length };
+    });
+
+    // Fetch the new shops to return
+    const newShops = await prisma.shop.findMany({
+      orderBy: { name: 'asc' }
+    });
+
+    res.json({
+      success: true,
+      message: `Successfully replaced all shops. ${result.created} shops created, ${result.unassigned} cars unassigned`,
+      data: newShops,
+      stats: {
+        shopsCreated: result.created,
+        carsUnassigned: result.unassigned
+      }
+    });
+  } catch (error: any) {
+    throw createError(error.message, error.statusCode || 500);
+  }
+});
+
+/**
+ * GET /api/shops/template/download
+ * Download a CSV template for shop upload
+ */
+router.get('/template/download', (req: Request, res: Response) => {
+  const template = [
+    { name: 'Shop A', city: 'New York', code: 'NYC-001', capacity: 50 },
+    { name: 'Shop B', city: 'Los Angeles', code: 'LA-001', capacity: 40 }
+  ];
+
+  const worksheet = XLSX.utils.json_to_sheet(template);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'Shops');
+
+  const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+
+  res.setHeader('Content-Disposition', 'attachment; filename=shops_template.xlsx');
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.send(buffer);
+});
+
+export default router;
